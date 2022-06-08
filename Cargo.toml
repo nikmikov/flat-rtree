@@ -1,0 +1,10 @@
+[package]
+authors = ["Feodr <feodr@maprs.org>"]
+name = "maprs-rtree"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+rand = "0.8.4"
