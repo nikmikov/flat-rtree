@@ -25,9 +25,9 @@ pub trait Rectangle2D {
 }
 
 pub struct RTree<const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> {
-    len: usize,
-    tree: Vec<R>,
-    data: Vec<T>,
+    data_nodes_offset: usize,
+    tree: Box<[R]>,
+    data: Box<[T]>,
 }
 
 pub enum BulkLoadStrategy {
@@ -39,15 +39,11 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
     RTree<ELEMENTS_PER_NODE, R, T>
 {
     pub fn len(&self) -> usize {
-        self.len
+        self.data.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.data.iter()
+        self.len() == 0
     }
 
     /// return all elements intersecting bounding rectangle
@@ -67,7 +63,9 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
     }
 
     fn bulk_load_sort_tile_recursive(mut input: Vec<(R, T)>) -> Self {
-        let tree_height = get_tree_height::<ELEMENTS_PER_NODE>(input.len());
+        let number_of_data_elements = input.len();
+        let tree_height =
+            get_tree_height::<ELEMENTS_PER_NODE>(number_of_data_elements);
         let number_of_tree_nodes =
             get_number_of_tree_nodes::<ELEMENTS_PER_NODE>(tree_height);
         let number_of_data_nodes = ELEMENTS_PER_NODE.pow(tree_height);
@@ -128,21 +126,10 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
         }
 
         Self {
-            len: data.len(),
-            tree,
-            data,
+            data_nodes_offset,
+            tree: tree.into_boxed_slice(),
+            data: data.into_boxed_slice(),
         }
-    }
-}
-
-impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
-    IntoIterator for RTree<ELEMENTS_PER_NODE, R, T>
-{
-    type Item = T;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.data.into_iter()
     }
 }
 
@@ -188,11 +175,11 @@ impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy>
     }
 
     fn is_data_node(&self, index: &usize) -> bool {
-        *index >= self.data_nodes_start_index()
+        *index >= self.data_nodes_offset()
     }
 
     fn get_element(&'a self, index: &usize) -> Option<T> {
-        let data_nodes_start_index = self.data_nodes_start_index();
+        let data_nodes_start_index = self.data_nodes_offset();
         if *index < data_nodes_start_index {
             None
         } else {
@@ -200,9 +187,8 @@ impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy>
         }
     }
 
-    fn data_nodes_start_index(&self) -> usize {
-        debug_assert!(self.rtree.tree.len() > self.rtree.data.len());
-        self.rtree.tree.len() - self.rtree.data.len()
+    fn data_nodes_offset(&self) -> usize {
+        self.rtree.data_nodes_offset
     }
 }
 
@@ -212,16 +198,19 @@ impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> Iterator
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let index = self.index;
-        let intersects = self.rtree.tree.get(index)?.intersects(self.rectangle);
+        let current_index = self.index;
+        let rectangle = &self.rtree.tree.get(current_index)?;
+
+        let intersects = rectangle.intersects(self.rectangle);
 
         if !intersects {
             // try next element or move up
             self.index = self.walk_next(&self.index)?;
             self.next()
-        } else if self.is_data_node(&self.index) {
-            self.index = self.walk_next(&self.index)?;
-            self.get_element(&index)
+        } else if self.is_data_node(&current_index) {
+            self.index =
+                self.walk_next(&self.index).unwrap_or(self.rtree.tree.len());
+            self.get_element(&current_index)
         } else {
             self.index = self.walk_down(&self.index)?;
             self.next()
@@ -292,7 +281,29 @@ mod tests {
         left + (right - left) / 2
     }
 
-    impl TestRect {}
+    impl TestRect {
+        fn generate<R: Rng>(
+            rng: &mut R,
+            min_x: i32,
+            min_y: i32,
+            max_x: i32,
+            max_y: i32,
+            max_width: i32,
+            max_height: i32,
+        ) -> Self {
+            loop {
+                let x = rng.gen_range(min_x..=max_x);
+                let y = rng.gen_range(min_y..=max_y);
+                // center coordinates
+                let width = rng.gen_range(1..=max_width);
+                let height = rng.gen_range(1..=max_height);
+
+                if x + width <= max_x && y + height <= max_height {
+                    return TestRect(x, y, x + width, y + height);
+                }
+            }
+        }
+    }
 
     impl Rectangle2D for TestRect {
         const INVALID: Self = TestRect(i32::MAX, i32::MAX, i32::MIN, i32::MIN);
@@ -302,9 +313,9 @@ mod tests {
             let Self(other_min_x, other_min_y, other_max_x, other_max_y) =
                 other;
             !(other_min_x > max_x
-                && other_max_x < min_x
-                && other_min_y > max_y
-                && other_max_y < min_y)
+                || other_max_x < min_x
+                || other_min_y > max_y
+                || other_max_y < min_y)
         }
 
         fn merge(&self, other: &Self) -> Self {
@@ -396,36 +407,34 @@ mod tests {
         assert_eq!(get_parent_index::<4>(&20), Some(4));
     }
 
-    fn generate_rectangle<R: Rng>(
-        rng: &mut R,
-        min_x: i32,
-        min_y: i32,
-        max_x: i32,
-        max_y: i32,
-        max_width: i32,
-        max_height: i32,
-    ) -> TestRect {
-        loop {
-            let x = rng.gen_range(min_x..=max_x);
-            let y = rng.gen_range(min_y..=max_y);
-            // center coordinates
-            let width = rng.gen_range(1..=max_width);
-            let height = rng.gen_range(1..=max_height);
+    #[test]
+    fn zero_height_test() {
+        let rect1 = TestRect(0, 0, 1, 1);
+        let rect2 = TestRect(2, 2, 3, 3);
+        let id1 = 1i32;
+        let id2 = 2i32;
+        let data = vec![(rect1, id1), (rect2, id2)];
+        let tree = RTree::<4, _, _>::load(
+            data.clone(),
+            BulkLoadStrategy::SortTileRecursive,
+        );
+        assert_eq!(tree.len(), 2);
 
-            if x + width <= max_x && y + height <= max_height {
-                return TestRect(x, y, x + width, y + height);
-            }
-        }
+        let result_1: Vec<i32> = tree.intersects(&rect1).collect();
+        assert_eq!(result_1, vec![id1]);
+
+        let result_2: Vec<i32> = tree.intersects(&rect2).collect();
+        assert_eq!(result_2, vec![id2]);
     }
 
     #[test]
     fn load_test() {
-        const NUM_ELEMENTS: usize = 16;
+        const NUM_ELEMENTS: usize = 17;
 
         const MIN_X: i32 = 0;
         const MIN_Y: i32 = 0;
-        const MAX_X: i32 = 1000;
-        const MAX_Y: i32 = 1000;
+        const MAX_X: i32 = 100;
+        const MAX_Y: i32 = 100;
         const MAX_RECTANGLE_WIDTH: i32 = 100;
         const MAX_RECTANGLE_HEIGHT: i32 = 100;
 
@@ -433,7 +442,7 @@ mod tests {
 
         let data: Vec<(TestRect, usize)> = (0..NUM_ELEMENTS)
             .map(|i| {
-                let r = generate_rectangle(
+                let r = TestRect::generate(
                     &mut rng,
                     MIN_X,
                     MIN_Y,
@@ -446,9 +455,21 @@ mod tests {
             })
             .collect();
 
-        let tree =
-            RTree::<4, _, _>::load(data, BulkLoadStrategy::SortTileRecursive);
+        let tree = RTree::<4, _, _>::load(
+            data.clone(),
+            BulkLoadStrategy::SortTileRecursive,
+        );
 
-        println!("{:?}", tree.tree[0..].iter().collect::<Vec<&TestRect>>());
+        for (rect1, index1) in &data {
+            let result: Vec<usize> = tree.intersects(&rect1).collect();
+            for (rect2, index2) in &data {
+                let intersects_expected = rect1.intersects(rect2);
+                let intersects_actual = result.contains(index2);
+                assert_eq!(
+                    intersects_actual, intersects_expected,
+                    "Failed: {index1}:{index2}"
+                );
+            }
+        }
     }
 }
