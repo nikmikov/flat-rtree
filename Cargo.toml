@@ -1,10 +1,17 @@
 [package]
 authors = ["Feodr <feodr@maprs.org>"]
-name = "maprs-rtree"
+name = "flat-rtree"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 
 [dev-dependencies]
-rand = "0.8.4"
+criterion = "0.3"
+flate2 = { version = "1.0", features = ["rust_backend"], default-features = false }
+rand = "0.8"
+rstar = "0.9.3" # for comparison benchmarks
+
+[[bench]]
+name    = "rtree_benchmark"
+harness = false

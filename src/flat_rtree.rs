@@ -10,6 +10,7 @@
 ///
 /// http://ceur-ws.org/Vol-74/files/FORUM_18.pdf
 use std::cmp::Ordering;
+use std::ops::Rem;
 
 pub trait Rectangle2D {
     const INVALID: Self;
@@ -24,7 +25,7 @@ pub trait Rectangle2D {
     fn cmp_y(&self, other: &Self) -> Ordering;
 }
 
-pub struct RTree<const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> {
+pub struct FlatRTree<const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> {
     data_nodes_offset: usize,
     tree: Box<[R]>,
     data: Box<[T]>,
@@ -35,8 +36,8 @@ pub enum BulkLoadStrategy {
     OverlapMinimizingTopDown,
 }
 
-impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
-    RTree<ELEMENTS_PER_NODE, R, T>
+impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Clone, T: Copy>
+    FlatRTree<ELEMENTS_PER_NODE, R, T>
 {
     pub fn len(&self) -> usize {
         self.data.len()
@@ -51,14 +52,16 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
         &'a self,
         bounding_rectangle: &'a R,
     ) -> impl Iterator<Item = T> + 'a {
-        RTreeIterator::new(self, bounding_rectangle)
+        FlatRTreeIterator::new(self, bounding_rectangle)
     }
 
     pub fn load(input: Vec<(R, T)>, strategy: BulkLoadStrategy) -> Self {
         use BulkLoadStrategy::*;
         match strategy {
             SortTileRecursive => Self::bulk_load_sort_tile_recursive(input),
-            OverlapMinimizingTopDown => todo!(),
+            OverlapMinimizingTopDown => {
+                Self::bulk_load_overlap_minimising_top_down(input)
+            }
         }
     }
 
@@ -70,8 +73,6 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
             get_number_of_tree_nodes::<ELEMENTS_PER_NODE>(tree_height);
         let number_of_data_nodes = ELEMENTS_PER_NODE.pow(tree_height);
 
-        println!("input len: {}, height: {tree_height}, number of tree nodes/ data nodes: {number_of_tree_nodes}/{number_of_data_nodes }", input.len());
-
         // sort input by X dimension
         input.sort_unstable_by(|(rect1, _), (rect2, _)| rect1.cmp_x(rect2));
         // partition sorted input into `num_slices_x`
@@ -82,12 +83,10 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
 
         let slice_size =
             (input.len() as f64 / num_slices_x as f64).ceil() as usize;
-        println!("Num slices x:{num_slices_x}, slice size: {slice_size}");
         // sort each slice by Y dimension
         for slice_num in 0..num_slices_x {
             let start_ix = slice_num * slice_size;
             let end_ix = std::cmp::min(input.len(), start_ix + slice_size);
-            println!("Sorting: {}..{}", start_ix, end_ix);
             input[start_ix..end_ix]
                 .sort_unstable_by(|(rect1, _), (rect2, _)| rect1.cmp_y(rect2));
         }
@@ -109,7 +108,6 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
             let upper_level_start_index =
                 get_parent_index::<ELEMENTS_PER_NODE>(&level_start_index)
                     .unwrap_or(0);
-            println!("Level index: {level_start_index}, upper: {upper_level_start_index}");
             let mut current_block_start_index = level_start_index;
             for parent_index in upper_level_start_index..level_start_index {
                 let current_block_end_index =
@@ -131,24 +129,95 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Copy, T: Copy>
             data: data.into_boxed_slice(),
         }
     }
+
+    fn bulk_load_overlap_minimising_top_down(mut input: Vec<(R, T)>) -> Self {
+        let number_of_data_elements = input.len();
+        let tree_height =
+            get_tree_height::<ELEMENTS_PER_NODE>(number_of_data_elements);
+        let number_of_tree_nodes =
+            get_number_of_tree_nodes::<ELEMENTS_PER_NODE>(tree_height);
+        let number_of_data_nodes = ELEMENTS_PER_NODE.pow(tree_height);
+
+        // recursively sort by x and y coordinate until we reach last level
+
+        let mut partition_queue: Vec<(u32, &mut [(R, T)])> =
+            Vec::with_capacity(100);
+
+        partition_queue
+            .push((tree_height, &mut input[0..number_of_data_elements]));
+        while let Some((depth, slice)) = partition_queue.pop() {
+            match (tree_height - depth) % 2 {
+                0 => slice.sort_unstable_by(|(r1, _), (r2, _)| r1.cmp_x(r2)),
+                _ => slice.sort_unstable_by(|(r1, _), (r2, _)| r1.cmp_y(r2)),
+            };
+
+            let new_depth = depth - 1;
+            if new_depth > 1 {
+                let subtree_len = match slice.len() % ELEMENTS_PER_NODE {
+                    0 => slice.len() / ELEMENTS_PER_NODE,
+                    _ => 1 + slice.len() / ELEMENTS_PER_NODE,
+                };
+                for chunk in slice.chunks_mut(subtree_len) {
+                    partition_queue.push((new_depth, chunk));
+                }
+            }
+        }
+
+        let mut data = Vec::with_capacity(number_of_data_nodes);
+        let mut tree = vec![R::INVALID; number_of_tree_nodes];
+
+        // copy data into leaf nodes
+        let data_nodes_offset = number_of_tree_nodes - number_of_data_nodes;
+        let tree_data_nodes = &mut tree[data_nodes_offset..];
+        for (rectangle, element) in input.into_iter() {
+            tree_data_nodes[data.len()] = rectangle;
+            data.push(element);
+        }
+
+        // go from bottom up and calculate bounding boxes of parent nodes
+        let mut level_start_index = data_nodes_offset;
+        while level_start_index > 0 {
+            let upper_level_start_index =
+                get_parent_index::<ELEMENTS_PER_NODE>(&level_start_index)
+                    .unwrap_or(0);
+            let mut current_block_start_index = level_start_index;
+            for parent_index in upper_level_start_index..level_start_index {
+                let current_block_end_index =
+                    current_block_start_index + ELEMENTS_PER_NODE;
+                tree[parent_index] = tree
+                    [current_block_start_index..current_block_end_index]
+                    .iter()
+                    .fold(R::INVALID, |rect_acc, rect| rect_acc.merge(rect));
+
+                current_block_start_index = current_block_end_index;
+            }
+            level_start_index = upper_level_start_index
+        }
+
+        Self {
+            data_nodes_offset,
+            tree: tree.into_boxed_slice(),
+            data: data.into_boxed_slice(),
+        }
+    }
 }
 
-struct RTreeIterator<
+struct FlatRTreeIterator<
     'a,
     const ELEMENTS_PER_NODE: usize,
     R: Rectangle2D,
     T: Copy,
 > {
-    rtree: &'a RTree<ELEMENTS_PER_NODE, R, T>,
+    rtree: &'a FlatRTree<ELEMENTS_PER_NODE, R, T>,
     rectangle: &'a R,
     index: usize,
 }
 
 impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy>
-    RTreeIterator<'a, ELEMENTS_PER_NODE, R, T>
+    FlatRTreeIterator<'a, ELEMENTS_PER_NODE, R, T>
 {
-    fn new(
-        rtree: &'a RTree<ELEMENTS_PER_NODE, R, T>,
+    const fn new(
+        rtree: &'a FlatRTree<ELEMENTS_PER_NODE, R, T>,
         rectangle: &'a R,
     ) -> Self {
         Self {
@@ -174,7 +243,7 @@ impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy>
         }
     }
 
-    fn is_data_node(&self, index: &usize) -> bool {
+    const fn is_data_node(&self, index: &usize) -> bool {
         *index >= self.data_nodes_offset()
     }
 
@@ -187,13 +256,13 @@ impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy>
         }
     }
 
-    fn data_nodes_offset(&self) -> usize {
+    const fn data_nodes_offset(&self) -> usize {
         self.rtree.data_nodes_offset
     }
 }
 
 impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> Iterator
-    for RTreeIterator<'a, ELEMENTS_PER_NODE, R, T>
+    for FlatRTreeIterator<'a, ELEMENTS_PER_NODE, R, T>
 {
     type Item = T;
 
@@ -220,7 +289,7 @@ impl<'a, const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> Iterator
 
 /// return true if the node is last node in the block
 fn is_last_block_node<const ELEMENTS_PER_NODE: usize>(index: &usize) -> bool {
-    index % ELEMENTS_PER_NODE == ELEMENTS_PER_NODE - 1
+    index.rem(ELEMENTS_PER_NODE) == ELEMENTS_PER_NODE - 1
 }
 
 /// return index of first child of the node located at given index
@@ -414,8 +483,8 @@ mod tests {
         let id1 = 1i32;
         let id2 = 2i32;
         let data = vec![(rect1, id1), (rect2, id2)];
-        let tree = RTree::<4, _, _>::load(
-            data.clone(),
+        let tree = FlatRTree::<4, _, _>::load(
+            data,
             BulkLoadStrategy::SortTileRecursive,
         );
         assert_eq!(tree.len(), 2);
@@ -429,12 +498,12 @@ mod tests {
 
     #[test]
     fn load_test() {
-        const NUM_ELEMENTS: usize = 17;
+        const NUM_ELEMENTS: usize = 173;
 
         const MIN_X: i32 = 0;
         const MIN_Y: i32 = 0;
-        const MAX_X: i32 = 100;
-        const MAX_Y: i32 = 100;
+        const MAX_X: i32 = 200;
+        const MAX_Y: i32 = 200;
         const MAX_RECTANGLE_WIDTH: i32 = 100;
         const MAX_RECTANGLE_HEIGHT: i32 = 100;
 
@@ -455,16 +524,16 @@ mod tests {
             })
             .collect();
 
-        let tree = RTree::<4, _, _>::load(
+        let tree = FlatRTree::<4, _, _>::load(
             data.clone(),
-            BulkLoadStrategy::SortTileRecursive,
+            BulkLoadStrategy::OverlapMinimizingTopDown,
         );
 
         for (rect1, index1) in &data {
-            let result: Vec<usize> = tree.intersects(&rect1).collect();
             for (rect2, index2) in &data {
                 let intersects_expected = rect1.intersects(rect2);
-                let intersects_actual = result.contains(index2);
+                let intersects_actual =
+                    tree.intersects(rect1).any(|x| x == *index2);
                 assert_eq!(
                     intersects_actual, intersects_expected,
                     "Failed: {index1}:{index2}"
