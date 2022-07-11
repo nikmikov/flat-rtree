@@ -1,3 +1,3 @@
 mod flat_rtree;
 
-pub use crate::flat_rtree::{BulkLoadStrategy, FlatRTree, Rectangle2D};
+pub use crate::flat_rtree::{FlatRTree, Rectangle2D};

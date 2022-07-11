@@ -31,11 +31,6 @@ pub struct FlatRTree<const ELEMENTS_PER_NODE: usize, R: Rectangle2D, T: Copy> {
     data: Box<[T]>,
 }
 
-pub enum BulkLoadStrategy {
-    SortTileRecursive,
-    OverlapMinimizingTopDown,
-}
-
 impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Clone, T: Copy>
     FlatRTree<ELEMENTS_PER_NODE, R, T>
 {
@@ -55,79 +50,8 @@ impl<const ELEMENTS_PER_NODE: usize, R: Rectangle2D + Clone, T: Copy>
         FlatRTreeIterator::new(self, bounding_rectangle)
     }
 
-    pub fn load(input: Vec<(R, T)>, strategy: BulkLoadStrategy) -> Self {
-        use BulkLoadStrategy::*;
-        match strategy {
-            SortTileRecursive => Self::bulk_load_sort_tile_recursive(input),
-            OverlapMinimizingTopDown => {
-                Self::bulk_load_overlap_minimising_top_down(input)
-            }
-        }
-    }
-
-    fn bulk_load_sort_tile_recursive(mut input: Vec<(R, T)>) -> Self {
-        let number_of_data_elements = input.len();
-        let tree_height =
-            get_tree_height::<ELEMENTS_PER_NODE>(number_of_data_elements);
-        let number_of_tree_nodes =
-            get_number_of_tree_nodes::<ELEMENTS_PER_NODE>(tree_height);
-        let number_of_data_nodes = ELEMENTS_PER_NODE.pow(tree_height);
-
-        // sort input by X dimension
-        input.sort_unstable_by(|(rect1, _), (rect2, _)| rect1.cmp_x(rect2));
-        // partition sorted input into `num_slices_x`
-        let num_slices_x = (number_of_data_nodes as f64
-            / ELEMENTS_PER_NODE as f64)
-            .sqrt()
-            .ceil() as usize;
-
-        let slice_size =
-            (input.len() as f64 / num_slices_x as f64).ceil() as usize;
-        // sort each slice by Y dimension
-        for slice_num in 0..num_slices_x {
-            let start_ix = slice_num * slice_size;
-            let end_ix = std::cmp::min(input.len(), start_ix + slice_size);
-            input[start_ix..end_ix]
-                .sort_unstable_by(|(rect1, _), (rect2, _)| rect1.cmp_y(rect2));
-        }
-
-        let mut data = Vec::with_capacity(number_of_data_nodes);
-        let mut tree = vec![R::INVALID; number_of_tree_nodes];
-
-        // copy data into leaf nodes
-        let data_nodes_offset = number_of_tree_nodes - number_of_data_nodes;
-        let tree_data_nodes = &mut tree[data_nodes_offset..];
-        for (rectangle, element) in input.into_iter() {
-            tree_data_nodes[data.len()] = rectangle;
-            data.push(element);
-        }
-
-        // go from bottom up and calculate bounding boxes of parent nodes
-        let mut level_start_index = data_nodes_offset;
-        while level_start_index > 0 {
-            let upper_level_start_index =
-                get_parent_index::<ELEMENTS_PER_NODE>(&level_start_index)
-                    .unwrap_or(0);
-            let mut current_block_start_index = level_start_index;
-            for parent_index in upper_level_start_index..level_start_index {
-                let current_block_end_index =
-                    current_block_start_index + ELEMENTS_PER_NODE;
-
-                tree[parent_index] = tree
-                    [current_block_start_index..current_block_end_index]
-                    .iter()
-                    .fold(R::INVALID, |rect_acc, rect| rect_acc.merge(rect));
-
-                current_block_start_index = current_block_end_index;
-            }
-            level_start_index = upper_level_start_index
-        }
-
-        Self {
-            data_nodes_offset,
-            tree: tree.into_boxed_slice(),
-            data: data.into_boxed_slice(),
-        }
+    pub fn load(input: Vec<(R, T)>) -> Self {
+        Self::bulk_load_overlap_minimising_top_down(input)
     }
 
     fn bulk_load_overlap_minimising_top_down(mut input: Vec<(R, T)>) -> Self {
@@ -483,10 +407,7 @@ mod tests {
         let id1 = 1i32;
         let id2 = 2i32;
         let data = vec![(rect1, id1), (rect2, id2)];
-        let tree = FlatRTree::<4, _, _>::load(
-            data,
-            BulkLoadStrategy::SortTileRecursive,
-        );
+        let tree = FlatRTree::<4, _, _>::load(data);
         assert_eq!(tree.len(), 2);
 
         let result_1: Vec<i32> = tree.intersects(&rect1).collect();
@@ -524,10 +445,7 @@ mod tests {
             })
             .collect();
 
-        let tree = FlatRTree::<4, _, _>::load(
-            data.clone(),
-            BulkLoadStrategy::OverlapMinimizingTopDown,
-        );
+        let tree = FlatRTree::<4, _, _>::load(data.clone());
 
         for (rect1, index1) in &data {
             for (rect2, index2) in &data {

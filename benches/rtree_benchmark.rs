@@ -2,7 +2,6 @@ use std::cmp::Ordering;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::time::Duration;
 
 use flat_rtree::Rectangle2D;
 use flate2::read::GzDecoder;
@@ -32,7 +31,7 @@ pub fn rtree_benchmark(c: &mut Criterion) {
     let flat_rtree = load_flat_rtree(ways);
 
     let mut group = c.benchmark_group("Rtree query benchmark");
-    group.measurement_time(Duration::from_secs(25));
+
     group.bench_function("Rstar", |b| {
         b.iter(|| {
             for way in queries.iter() {
@@ -151,8 +150,5 @@ fn load_rstar(input: Vec<Way>) -> rstar::RTree<Way> {
 fn load_flat_rtree(input: Vec<Way>) -> flat_rtree::FlatRTree<4, Rect, u32> {
     let input: Vec<(Rect, u32)> =
         input.into_iter().map(|x| (x.bbox.clone(), x.id)).collect();
-    flat_rtree::FlatRTree::load(
-        input,
-        flat_rtree::BulkLoadStrategy::OverlapMinimizingTopDown,
-    )
+    flat_rtree::FlatRTree::load(input)
 }
