@@ -1,0 +1,18 @@
+[package]
+authors = ["Nikolay Mikov <nik.mikov@gmail.com>"]
+name = "flat-rtree"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.5"
+flate2 = { version = "1.0", features = ["rust_backend"], default-features = false }
+rand = "0.8"
+rstar = "0.11" # for comparison benchmarks
+sif-rtree = "0.1"  # for comparison benchmarks
+
+[[bench]]
+name    = "rtree_benchmark"
+harness = false

@@ -1,0 +1,6 @@
+/target
+/data
+/cli/src/proto
+**/*.rs.bk
+.DS_Store
+Cargo.lock
